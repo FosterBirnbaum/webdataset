@@ -430,7 +430,7 @@ def _map_tuple(data, *args, handler=reraise_exception):
 map_tuple = pipelinefilter(_map_tuple)
 
 
-def default_collation_fn(samples, combine_tensors=True, combine_scalars=True):
+def default_collation_fn(samples, combine_tensors=True, combine_scalars=True, noise_type=""):
     """Take a collection of samples (dictionaries) and create a batch.
 
     If `tensors` is True, `ndarray` objects are combined into
@@ -443,20 +443,45 @@ def default_collation_fn(samples, combine_tensors=True, combine_scalars=True):
 
     """
     assert isinstance(samples[0], (list, tuple)), type(samples[0])
+    import torch
     batched = list(zip(*samples))
     result = []
-    for b in batched:
+    for i_b, b in enumerate(batched):
         if isinstance(b[0], (int, float)):
             if combine_scalars:
                 b = np.array(list(b))
         elif isinstance(b[0], TorchTensor):
             if combine_tensors:
-                import torch
-
-                b = torch.stack(list(b))
+                max_len = 0
+                for data in b:
+                    max_len = max(max_len, data.shape[1])
+                b_list = []
+                
+                for data in b:
+                    data = torch.nn.functional.pad(data, (0,max_len - data.shape[1]), "constant", 0)
+                    b_list.append(data)
+                b = torch.stack(list(b_list))
         elif isinstance(b[0], np.ndarray):
             if combine_tensors:
                 b = np.array(list(b))
+        elif isinstance(b[0], tuple) and isinstance(b[0][0], TorchTensor):
+            if combine_tensors:
+                all_lens = []
+                
+                for i_part in range(len(b[0])):
+                    cur_lens = []
+                    for i_data in range(len(b)):
+                        cur_lens.append(b[i_data][i_part].shape[0])
+                    all_lens.append(max(cur_lens))
+                
+                b_list = []
+                for i_part in range(len(b[0])):
+                    cur_data = []
+                    for i_data in range(len(b)):
+                        data = torch.nn.functional.pad(b[i_data][i_part], (0, all_lens[i_part] - b[i_data][i_part].shape[0]), "constant", 0)
+                        cur_data.append(data)
+                    b_list.append(torch.stack(list(cur_data)))
+                b = b_list
         else:
             b = list(b)
         result.append(b)
@@ -465,9 +490,11 @@ def default_collation_fn(samples, combine_tensors=True, combine_scalars=True):
 
 def _batched(
     data,
-    batchsize=20,
+    batchsize=None,
     collation_fn=default_collation_fn,
     partial=True,
+    max_seq_tokens=6000,
+    num_ensembles=1
 ):
     """Create batches of the given size.
 
@@ -476,19 +503,26 @@ def _batched(
     :param tensors: automatically batch lists of ndarrays into ndarrays
     :param partial: return partial batches
     :returns: iterator
-
     """
     batch = []
+    current_batch_lens = []
     for sample in data:
-        if len(batch) >= batchsize:
-            if collation_fn is not None:
-                batch = collation_fn(batch)
-            yield batch
-            batch = []
-        batch.append(sample)
+        current_batch_lens.append(sample[3])
+        total_data_len = max(current_batch_lens) * len(current_batch_lens) * num_ensembles
+        if ((batchsize is not None and len(batch) >= batchsize) or
+            (max_seq_tokens is not None and total_data_len >= max_seq_tokens)):
+                if collation_fn is not None:
+                    batch = collation_fn(batch)
+                cur_batch = batch
+                batch = [sample]
+                current_batch_lens = [sample[3]]
+                yield cur_batch    
+        else:
+            batch.append(sample)
     if len(batch) == 0:
         return
-    elif len(batch) == batchsize or partial:
+    elif ((batchsize is not None and len(batch) == batchsize) or 
+        (max_seq_tokens is not None and total_data_len >= max_seq_tokens) or partial):
         if collation_fn is not None:
             batch = collation_fn(batch)
         yield batch

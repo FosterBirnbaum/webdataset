@@ -41,6 +41,7 @@ class DataPipeline(IterableDataset, PipelineStage):
                 self.pipeline.extend(arg)
             else:
                 self.pipeline.append(arg)
+        print(args)
 
     def invoke(self, f, *args, **kwargs):
         """Apply a pipeline stage, possibly to the output of a previous stage."""
